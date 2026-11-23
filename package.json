@@ -1,0 +1,24 @@
+{
+  "name": "nextcloud-note-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Nextcloud Notes",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@types/node": "^22.20.5",
+    "msw": "^3.0.7",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1"
+  }
+}
