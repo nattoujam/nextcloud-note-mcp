@@ -69,47 +69,84 @@ export class NotesClient {
     await this.request("DELETE", `/notes/${id}`);
   }
 
-  private async request<T>(
+  async getAttachment(id: number, path: string): Promise<Attachment> {
+    const response = await this.send("GET", `/attachment/${id}?${new URLSearchParams({ path })}`, {
+      target: "attachment",
+    });
+    return {
+      data: new Uint8Array(await response.arrayBuffer()),
+      mimeType: response.headers.get("Content-Type")?.split(";")[0]?.trim() || "application/octet-stream",
+    };
+  }
+
+  async addAttachment(id: number, file: Blob, fileName: string): Promise<string> {
+    const form = new FormData();
+    form.append("file", file, fileName);
+    const response = await this.send("POST", `/attachment/${id}`, { body: form, target: "attachment" });
+    return ((await response.json()) as { filename: string }).filename;
+  }
+
+  async deleteAttachment(id: number, path: string): Promise<void> {
+    await this.send("DELETE", `/attachment/${id}?${new URLSearchParams({ path })}`, { target: "attachment" });
+  }
+
+  private async request<T>(method: string, path: string, options: { body?: NoteInput; etag?: string } = {}): Promise<T> {
+    const response = await this.send(method, path, {
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      etag: options.etag,
+      target: "note",
+    });
+    return (await response.json()) as T;
+  }
+
+  private async send(
     method: string,
     path: string,
-    options: { body?: NoteInput; etag?: string } = {},
-  ): Promise<T> {
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-      Authorization: this.authorization,
-    };
-    if (options.body !== undefined) headers["Content-Type"] = "application/json";
+    options: { body?: string | FormData; etag?: string; target: RequestTarget },
+  ): Promise<Response> {
+    const headers: Record<string, string> = { Authorization: this.authorization };
+    if (options.target === "note") headers["Accept"] = "application/json";
+    if (typeof options.body === "string") headers["Content-Type"] = "application/json";
     if (options.etag !== undefined) headers["If-Match"] = `"${options.etag}"`;
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    });
+    const response = await fetch(`${this.baseUrl}${path}`, { method, headers, body: options.body });
     if (!response.ok) {
-      throw new NotesApiError(describeStatus(response.status), response.status);
+      throw new NotesApiError(describeStatus(response.status, options.target), response.status);
     }
-    return (await response.json()) as T;
+    return response;
   }
 }
 
-function describeStatus(status: number): string {
+export interface Attachment {
+  data: Uint8Array;
+  mimeType: string;
+}
+
+type RequestTarget = "note" | "attachment";
+
+function describeStatus(status: number, target: RequestTarget): string {
   switch (status) {
     case 400:
-      return "Invalid request (400): check the note id, title or category.";
+      return target === "note"
+        ? "Invalid request (400): check the note id, title or category."
+        : "Invalid attachment path, or the Notes app is too old for attachments (400).";
     case 401:
       return "Authentication failed (401): check NC_NOTES_USER and NC_NOTES_PASSWORD.";
     case 403:
       return "The note is read-only (403).";
     case 404:
-      return "Note not found (404).";
+      return target === "note" ? "Note not found (404)." : "Note or attachment not found (404).";
+    case 405:
+      return "The installed Notes app does not support this attachment operation (405).";
     case 412:
       return "The note was changed elsewhere since its etag was read (412).";
     case 423:
       return "The note file is locked (423); try again later.";
+    case 500:
+      if (target === "attachment") return "Nextcloud could not store the attachment (500).";
+      break;
     case 507:
       return "Insufficient storage on the Nextcloud server (507).";
-    default:
-      return `Nextcloud Notes API returned HTTP ${status}.`;
   }
+  return `Nextcloud Notes API returned HTTP ${status}.`;
 }

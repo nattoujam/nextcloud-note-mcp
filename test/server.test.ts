@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import { http, HttpResponse } from "msw/http";
@@ -6,7 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { NotesClient } from "../src/notes-api.js";
 import { createServer } from "../src/server.js";
 import { FakeNotesStore } from "./fake-notes-api.js";
-import { config, notes as fixtureNotes } from "./fixtures.js";
+import { attachments as fixtureAttachments, config, notes as fixtureNotes } from "./fixtures.js";
 
 const network = setupServer();
 let store: FakeNotesStore;
@@ -17,7 +20,7 @@ beforeAll(() => network.listen({ onUnhandledFrame: "error" }));
 afterAll(() => network.close());
 
 beforeEach(async () => {
-  store = new FakeNotesStore(fixtureNotes);
+  store = new FakeNotesStore(fixtureNotes, fixtureAttachments);
   network.use(...store.handlers());
   client = await connect(new NotesClient(config));
 });
@@ -46,15 +49,16 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 }
 
 describe("list_notes", () => {
-  test("lists every note as tab-separated rows under a header", async () => {
+  test("lists every note, newest first, as tab-separated rows under a header", async () => {
     const { text } = await call("list_notes");
 
     expect(text.split("\n")).toEqual([
       "id\tcategory\ttitle\tmodified",
-      "3\tProjects/Alpha\tKickoff memo\t2023-11-14T22:13:20.000Z",
-      "17\tProjects/Alpha\t架空の設計メモ\t2024-03-09T16:00:00.000Z",
-      "42\t\tCache glossary\t2024-07-09T04:40:00.000Z",
       "108\tShared\tShared checklist\t2024-10-27T03:33:20.000Z",
+      "256\tOps\tRunbook draft\t2024-08-30T06:40:00.000Z",
+      "42\t\tCache glossary\t2024-07-09T04:40:00.000Z",
+      "17\tProjects/Alpha\t架空の設計メモ\t2024-03-09T16:00:00.000Z",
+      "3\tProjects/Alpha\tKickoff memo\t2023-11-14T22:13:20.000Z",
     ]);
   });
 
@@ -62,6 +66,40 @@ describe("list_notes", () => {
     const { text } = await call("list_notes", { category: "Projects/Alpha", favorite: true });
 
     expect(text.split("\n").slice(1)).toEqual(["3\tProjects/Alpha\tKickoff memo\t2023-11-14T22:13:20.000Z"]);
+  });
+
+  test("filters by modification time, including a note modified exactly then", async () => {
+    const { text } = await call("list_notes", { modified_since: "2024-08-30T15:40:00+09:00" });
+
+    expect(text.split("\n").slice(1)).toEqual([
+      "108\tShared\tShared checklist\t2024-10-27T03:33:20.000Z",
+      "256\tOps\tRunbook draft\t2024-08-30T06:40:00.000Z",
+    ]);
+  });
+
+  test("treats a bare date as midnight UTC", async () => {
+    const { text } = await call("list_notes", { modified_since: "2024-07-10" });
+
+    expect(text.split("\n").slice(1)).toEqual([
+      "108\tShared\tShared checklist\t2024-10-27T03:33:20.000Z",
+      "256\tOps\tRunbook draft\t2024-08-30T06:40:00.000Z",
+    ]);
+  });
+
+  test("limits the rows and says how many were left out", async () => {
+    const { text } = await call("list_notes", { limit: 2 });
+
+    expect(text.split("\n").slice(1)).toEqual([
+      "108\tShared\tShared checklist\t2024-10-27T03:33:20.000Z",
+      "256\tOps\tRunbook draft\t2024-08-30T06:40:00.000Z",
+      "(3 more notes not shown)",
+    ]);
+  });
+
+  test("rejects a modification time that is not ISO 8601", async () => {
+    const result = await call("list_notes", { modified_since: "last week" });
+
+    expect(result.isError).toBe(true);
   });
 
   test("reports an authentication failure as a tool error", async () => {
@@ -143,6 +181,53 @@ describe("get_note", () => {
 
   test("reports a missing note", async () => {
     expect(await call("get_note", { id: 9999 })).toEqual({ text: "Note not found (404).", isError: true });
+  });
+
+  test("returns only the requested lines", async () => {
+    const { text } = await call("get_note", { id: 256, start_line: 3, end_line: 4 });
+
+    expect(text.split("\n").slice(-4)).toEqual(["lines: 3-4 of 11", "", "## Setup", "install steps"]);
+  });
+
+  test("stops at the last line when end_line is past it", async () => {
+    const { text } = await call("get_note", { id: 256, start_line: 10, end_line: 99 });
+
+    expect(text.split("\n").slice(-4)).toEqual(["lines: 10-11 of 11", "", "## Teardown", "remove steps"]);
+  });
+
+  test("reports a start_line past the end of the note", async () => {
+    expect(await call("get_note", { id: 42, start_line: 2 })).toEqual({
+      text: "start_line 2 is past the end of note 42 (1 lines).",
+      isError: true,
+    });
+  });
+
+  test("rejects an end_line before start_line", async () => {
+    expect(await call("get_note", { id: 256, start_line: 5, end_line: 4 })).toEqual({
+      text: "end_line must not be less than start_line.",
+      isError: true,
+    });
+  });
+});
+
+describe("get_note_outline", () => {
+  test("lists ATX headings with line numbers, skipping fenced code and hashtags", async () => {
+    const { text } = await call("get_note_outline", { id: 256 });
+
+    expect(text.split("\n").slice(-6)).toEqual([
+      "lines: 11",
+      "",
+      "1:# Runbook draft",
+      "3:## Setup",
+      "8:### Verify",
+      "10:## Teardown",
+    ]);
+  });
+
+  test("says so when the note has no headings", async () => {
+    const { text } = await call("get_note_outline", { id: 42 });
+
+    expect(text.split("\n").slice(-1)).toEqual(["No headings."]);
   });
 });
 
@@ -250,6 +335,121 @@ describe("delete_note", () => {
   test("deletes the note", async () => {
     expect(await call("delete_note", { id: 17 })).toEqual({ text: "Deleted note 17.", isError: false });
     expect(store.find(17)).toBeUndefined();
+  });
+});
+
+describe("add_attachment", () => {
+  let directory: string;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), "nextcloud-note-mcp-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(directory, { recursive: true });
+  });
+
+  test("uploads a local file and returns the stored path", async () => {
+    const filePath = join(directory, "figure.svg");
+    await writeFile(filePath, "<svg/>");
+
+    const { text } = await call("add_attachment", { id: 42, file_path: filePath });
+
+    expect(text).toBe("Attached as .attachments.42/figure.svg");
+    expect(new TextDecoder().decode(store.findAttachment(42, ".attachments.42/figure.svg")?.data)).toBe("<svg/>");
+  });
+
+  test("reports a file that cannot be read", async () => {
+    const result = await call("add_attachment", { id: 42, file_path: join(directory, "missing.png") });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/^Cannot read .*missing\.png: /);
+  });
+
+  test("reports a missing note", async () => {
+    const filePath = join(directory, "figure.svg");
+    await writeFile(filePath, "<svg/>");
+
+    expect(await call("add_attachment", { id: 9999, file_path: filePath })).toEqual({
+      text: "Note or attachment not found (404).",
+      isError: true,
+    });
+  });
+});
+
+describe("get_attachment", () => {
+  test("returns an image as image content", async () => {
+    const result = await client.callTool({
+      name: "get_attachment",
+      arguments: { id: 3, path: ".attachments.3/diagram.png" },
+    });
+
+    expect(result.content).toEqual([{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);
+  });
+
+  test("returns a text file as text", async () => {
+    expect(await call("get_attachment", { id: 3, path: ".attachments.3/notes.txt" })).toEqual({
+      text: "plain text",
+      isError: false,
+    });
+  });
+
+  test("refuses other file types", async () => {
+    expect(await call("get_attachment", { id: 108, path: ".attachments.108/spec.pdf" })).toEqual({
+      text: ".attachments.108/spec.pdf is application/pdf; only PNG, JPEG, GIF, WebP and text files can be returned.",
+      isError: true,
+    });
+  });
+
+  test("reports a missing attachment", async () => {
+    expect(await call("get_attachment", { id: 3, path: ".attachments.3/absent.png" })).toEqual({
+      text: "Note or attachment not found (404).",
+      isError: true,
+    });
+  });
+});
+
+describe("delete_attachment", () => {
+  test("deletes the attachment", async () => {
+    expect(await call("delete_attachment", { id: 3, path: ".attachments.3/notes.txt" })).toEqual({
+      text: "Deleted attachment .attachments.3/notes.txt of note 3.",
+      isError: false,
+    });
+    expect(store.findAttachment(3, ".attachments.3/notes.txt")).toBeUndefined();
+  });
+
+  test("reports a read-only note", async () => {
+    expect(await call("delete_attachment", { id: 108, path: ".attachments.108/spec.pdf" })).toEqual({
+      text: "The note is read-only (403).",
+      isError: true,
+    });
+  });
+});
+
+describe("note resources", () => {
+  test("lists every note as a resource", async () => {
+    const { resources } = await client.listResources();
+
+    expect(resources).toHaveLength(5);
+    expect(resources[0]).toEqual({
+      uri: "notes://3",
+      name: "Kickoff memo",
+      title: "Kickoff memo",
+      description: "Category: Projects/Alpha",
+      mimeType: "text/markdown",
+    });
+    expect(resources[2]).toEqual({
+      uri: "notes://42",
+      name: "Cache glossary",
+      title: "Cache glossary",
+      mimeType: "text/markdown",
+    });
+  });
+
+  test("reads a note's content", async () => {
+    const { contents } = await client.readResource({ uri: "notes://42" });
+
+    expect(contents).toEqual([{ uri: "notes://42", mimeType: "text/markdown", text: "Terms only." }]);
   });
 });
 

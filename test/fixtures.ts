@@ -51,6 +51,28 @@ export const notes: Note[] = [
     content: "Terms only.",
   },
   {
+    id: 256,
+    etag: "etag-256-a",
+    readonly: false,
+    title: "Runbook draft",
+    category: "Ops",
+    favorite: false,
+    modified: 1_725_000_000,
+    content: [
+      "# Runbook draft",
+      "",
+      "## Setup",
+      "install steps",
+      "```bash",
+      "# not a heading",
+      "```",
+      "   ### Verify",
+      "#hashtag-not-heading",
+      "## Teardown",
+      "remove steps",
+    ].join("\n"),
+  },
+  {
     id: 108,
     etag: "etag-108-a",
     readonly: true,
@@ -60,4 +82,22 @@ export const notes: Note[] = [
     modified: 1_730_000_000,
     content: "- [ ] step one\n- [ ] step one\n- [x] step two",
   },
+];
+
+export interface FixtureAttachment {
+  noteId: number;
+  path: string;
+  mimeType: string;
+  data: Uint8Array;
+}
+
+export const attachments: FixtureAttachment[] = [
+  {
+    noteId: 3,
+    path: ".attachments.3/diagram.png",
+    mimeType: "image/png",
+    data: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  },
+  { noteId: 3, path: ".attachments.3/notes.txt", mimeType: "text/plain", data: new TextEncoder().encode("plain text") },
+  { noteId: 108, path: ".attachments.108/spec.pdf", mimeType: "application/pdf", data: new Uint8Array([0x25, 0x50]) },
 ];
